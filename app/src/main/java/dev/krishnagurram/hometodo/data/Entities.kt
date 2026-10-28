@@ -73,7 +73,7 @@ data class ItemStore(
     val storeId: String,
 )
 
-/** One row per check-off. History, "buy again" ranking and "probably due" all read this. */
+/** One row per tick. The History screen reads this, and it ranks suggestions by how often you buy things. */
 @Entity(
     tableName = "purchases",
     foreignKeys = [
