@@ -29,12 +29,25 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # Output is also saved to build.log so a failure can be reported (next-to-last step).
+      # Output is also saved to build.log so a failure can be reported (last step).
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee -a build.log
 
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace 2>&1 | tee -a build.log
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          RUN: ${{ github.run_number }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "hometodo-$RUN.apk"
+          gh release create "build-$RUN" "hometodo-$RUN.apk" \
+            --title "Build $RUN" \
+            --notes "${COMMIT_MSG:-Manual build}" \
+            --target "$GITHUB_SHA" 2>&1 | tee -a build.log
 
       # On failure, post the compiler errors and failed test messages as a comment on the
       # commit, so they're readable from the GitHub app (and by tools that can't open logs).
@@ -50,19 +63,8 @@ jobs:
             for f in $(find app/build/test-results -name '*.xml' 2>/dev/null); do
               grep -o '<testcase name="[^"]*"\|<failure message="[^"]*"' "$f" | grep -B1 '<failure' || true
             done | head -40
+            echo "--- last lines ---"
+            tail -25 build.log || true
             echo '```'
           } > report.md
           gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" -F body=@report.md
-
-      - name: Publish release
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-          RUN: ${{ github.run_number }}
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk "hometodo-$RUN.apk"
-          gh release create "build-$RUN" "hometodo-$RUN.apk" \
-            --title "Build $RUN" \
-            --notes "${COMMIT_MSG:-Manual build}" \
-            --target "$GITHUB_SHA"
