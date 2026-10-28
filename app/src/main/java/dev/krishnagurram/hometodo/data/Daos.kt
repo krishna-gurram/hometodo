@@ -37,7 +37,7 @@ abstract class StoreDao {
         SELECT s.id, s.name, s.colorHex, COUNT(i.id) AS neededCount
         FROM stores s
         LEFT JOIN item_stores x ON x.storeId = s.id
-        LEFT JOIN items i ON i.id = x.itemId AND i.needed = 1
+        LEFT JOIN items i ON i.id = x.itemId AND i.needed = 1 AND i.checkedAt IS NULL
         GROUP BY s.id
         ORDER BY s.sortOrder
         """
@@ -91,7 +91,7 @@ abstract class StoreDao {
 
     @Query(
         """
-        UPDATE items SET needed = 0, updatedAt = :at
+        UPDATE items SET needed = 0, checkedAt = NULL, updatedAt = :at
         WHERE needed = 1
           AND id IN (SELECT itemId FROM item_stores WHERE storeId = :storeId)
           AND id NOT IN (SELECT itemId FROM item_stores WHERE storeId != :storeId)
@@ -107,7 +107,8 @@ abstract class StoreDao {
      * labels go away, and orphaned items come off the list so they don't
      * reappear by surprise when you tag them to another store later.
      *
-     * The ORDER of these two lines matters. See lesson 1, question 4.
+     * The ORDER of these two lines matters: delete first, and CASCADE erases the
+     * store labels that resetItemsOnlyAt needs to find the orphaned items.
      */
     @Transaction
     open suspend fun deleteAndReset(storeId: String) {
@@ -128,53 +129,98 @@ abstract class ItemDao {
     @Insert
     abstract suspend fun insertPurchase(purchase: Purchase)
 
-    @Query("SELECT COUNT(*) FROM items")
-    abstract fun observeCatalogSize(): Flow<Int>
-
     @Query("SELECT * FROM items WHERE name = :name LIMIT 1")
     abstract suspend fun findByName(name: String): Item?
 
-    @Query("UPDATE items SET needed = 0, updatedAt = :at WHERE id = :itemId")
-    abstract suspend fun markBought(itemId: String, at: Long)
+    @Query("SELECT * FROM items WHERE id = :itemId")
+    abstract suspend fun byId(itemId: String): Item?
 
-    /** Add a new item to one or more store lists, as a single all-or-nothing write. */
+    /**
+     * Put an item on one or more lists, unchecked. If it was already on a list it keeps
+     * its place (listedAt); otherwise it goes to the bottom, like writing a new line.
+     */
     @Transaction
     open suspend fun addToLists(item: Item, storeIds: List<String>) {
-        upsert(item.copy(needed = true))
+        val at = now()
+        val listedAt = if (item.needed) item.listedAt ?: at else at
+        upsert(item.copy(needed = true, checkedAt = null, listedAt = listedAt, updatedAt = at))
         tag(storeIds.map { ItemStore(item.id, it) })
     }
 
     /**
-     * Check-off. Two writes that must succeed or fail together: if the app died
-     * between them you'd have an item that's off the list with no history row.
-     * Returns the purchase id so Undo knows which receipt to tear up.
+     * Typing "Ghee" and pressing Enter. If Ghee exists anywhere in your catalog, reuse it
+     * (that's what powers the suggestions); otherwise create it. Tag it here, put it on the list.
      */
     @Transaction
-    open suspend fun checkOff(item: Item, fromStoreId: String): String {
-        val at = now()
-        markBought(item.id, at)
-        val purchase = Purchase(itemId = item.id, storeId = fromStoreId, quantity = item.quantity, boughtAt = at)
-        insertPurchase(purchase)
-        return purchase.id
+    open suspend fun quickAdd(name: String, storeId: String) {
+        val item = findByName(name) ?: Item(name = name)
+        addToLists(item, listOf(storeId))
     }
 
-    @Query("DELETE FROM purchases WHERE id = :purchaseId")
-    abstract suspend fun deletePurchase(purchaseId: String)
-
-    @Query("UPDATE items SET needed = :needed, updatedAt = :at WHERE id = :itemId")
-    abstract suspend fun setNeeded(itemId: String, needed: Boolean, at: Long)
-
+    /** Tapping a suggestion: same as quickAdd, but we already know which item. */
     @Transaction
-    open suspend fun undoCheckOff(itemId: String, purchaseId: String) {
-        deletePurchase(purchaseId)
-        setNeeded(itemId, true, now())
+    open suspend fun addExistingToStore(itemId: String, storeId: String) {
+        val item = byId(itemId) ?: return
+        addToLists(item, listOf(storeId))
     }
+
+    // ---- check, uncheck, clear: the paper-list behavior ----
+
+    @Query("UPDATE items SET checkedAt = :at, updatedAt = :at WHERE id = :itemId")
+    abstract suspend fun setChecked(itemId: String, at: Long)
+
+    @Query("UPDATE items SET checkedAt = NULL, updatedAt = :at WHERE id = :itemId")
+    abstract suspend fun setUnchecked(itemId: String, at: Long)
+
+    /**
+     * Ticking an item strikes it through; it stays on the list until "Clear checked".
+     * It also writes a purchase row, which is what the History screen shows. Both writes
+     * use the same timestamp, which is how uncheck() finds this exact purchase again.
+     */
+    @Transaction
+    open suspend fun check(item: Item, storeId: String) {
+        val at = now()
+        setChecked(item.id, at)
+        insertPurchase(Purchase(itemId = item.id, storeId = storeId, quantity = item.quantity, boughtAt = at))
+    }
+
+    @Query("DELETE FROM purchases WHERE itemId = :itemId AND boughtAt = :boughtAt")
+    abstract suspend fun deletePurchaseAt(itemId: String, boughtAt: Long)
+
+    /** Un-ticking a struck item: it wasn't bought after all, so the purchase goes too. */
+    @Transaction
+    open suspend fun uncheck(item: Item) {
+        val checkedAt = item.checkedAt ?: return
+        deletePurchaseAt(item.id, checkedAt)
+        setUnchecked(item.id, now())
+    }
+
+    /**
+     * "Clear checked": every struck item on this store's list comes off the list.
+     * The items stay in your catalog (for suggestions), and their purchases stay in History.
+     */
+    @Query(
+        """
+        UPDATE items SET needed = 0, checkedAt = NULL, updatedAt = :at
+        WHERE checkedAt IS NOT NULL
+          AND id IN (SELECT itemId FROM item_stores WHERE storeId = :storeId)
+        """
+    )
+    abstract suspend fun clearChecked(storeId: String, at: Long)
+
+    /**
+     * Swipe to delete: off the list, no purchase recorded, nothing in History.
+     * The item is remembered only as a suggestion for next time.
+     */
+    @Query("UPDATE items SET needed = 0, checkedAt = NULL, updatedAt = :at WHERE id = :itemId")
+    abstract suspend fun removeFromList(itemId: String, at: Long)
 
     // ---- store list screen ----
 
     /**
-     * Everything on one store's list, plus the OTHER stores each item is tagged to
-     * (the "+ Costco" chips). GROUP_CONCAT joins those names into one string.
+     * One store's list in the order you wrote it: unchecked items first (oldest at the
+     * top, like a paper list), then struck-through ones in the order you ticked them.
+     * Also the OTHER stores each item is tagged to, for the "+ Costco" label.
      */
     @Query(
         """
@@ -185,32 +231,11 @@ abstract class ItemDao {
         FROM items i
         JOIN item_stores x ON x.itemId = i.id
         WHERE x.storeId = :storeId AND i.needed = 1
-        ORDER BY i.name COLLATE NOCASE
+        ORDER BY i.checkedAt IS NOT NULL,
+                 COALESCE(i.checkedAt, i.listedAt, i.updatedAt)
         """
     )
     abstract fun observeList(storeId: String): Flow<List<ListItem>>
-
-    /** Items you checked off at this store since `since` (start of today) and haven't re-added. */
-    @Query(
-        """
-        SELECT i.*, p.id AS purchaseId
-        FROM purchases p JOIN items i ON i.id = p.itemId
-        WHERE p.storeId = :storeId AND p.boughtAt >= :since AND i.needed = 0
-        ORDER BY p.boughtAt DESC
-        """
-    )
-    abstract fun observeGotToday(storeId: String, since: Long): Flow<List<GotItem>>
-
-    /**
-     * Typing "Ghee" in a store's add box. If Ghee already exists anywhere in your
-     * catalog, reuse it (and its history); otherwise create it. Either way, tag it to
-     * this store and put it on the list.
-     */
-    @Transaction
-    open suspend fun quickAdd(name: String, storeId: String) {
-        val item = findByName(name) ?: Item(name = name)
-        addToLists(item, listOf(storeId))
-    }
 
     @Query("SELECT storeId FROM item_stores WHERE itemId = :itemId")
     abstract suspend fun storeIdsFor(itemId: String): List<String>
@@ -234,55 +259,28 @@ abstract class ItemDao {
         tag(storeIds.map { ItemStore(itemId, it) })
     }
 
-    @Query("SELECT * FROM items WHERE id = :itemId")
-    abstract suspend fun byId(itemId: String): Item?
-
-    @Query("SELECT boughtAt FROM purchases WHERE itemId = :itemId ORDER BY boughtAt DESC")
-    abstract suspend fun purchaseTimes(itemId: String): List<Long>
-
-    // ---- search and buy again (milestone 4) ----
+    // ---- suggestions while typing ----
 
     /**
-     * The search-first add box. Matches name or aliases anywhere, then ranks:
-     * names that START with what you typed, then items bought in the last 6 months,
-     * then how often you buy it. So "ri" shows the rice you buy weekly first.
+     * Things you've added before that match what you're typing (name or "also called").
+     * Names that START with your text first, then the ones you've bought most.
      */
     @Query(
         """
         SELECT i.*,
           (SELECT COUNT(*) FROM purchases p WHERE p.itemId = i.id) AS timesBought,
-          (SELECT MAX(p.boughtAt) FROM purchases p WHERE p.itemId = i.id) AS lastBought,
           (SELECT GROUP_CONCAT(s.name, ', ')
              FROM item_stores x JOIN stores s ON s.id = x.storeId
             WHERE x.itemId = i.id) AS storeNames
         FROM items i
         WHERE i.name LIKE '%' || :query || '%' OR i.aliases LIKE '%' || :query || '%'
         ORDER BY (i.name LIKE :query || '%') DESC,
-                 (COALESCE(lastBought, 0) >= :activeSince) DESC,
                  timesBought DESC,
                  i.name COLLATE NOCASE
-        LIMIT 30
+        LIMIT 8
         """
     )
-    abstract fun search(query: String, activeSince: Long): Flow<List<CatalogItem>>
-
-    /** Every purchase of items tagged to this store that aren't on the list right now. */
-    @Query(
-        """
-        SELECT p.itemId AS itemId, i.name AS name, p.boughtAt AS boughtAt
-        FROM purchases p JOIN items i ON i.id = p.itemId
-        WHERE i.needed = 0
-          AND EXISTS (SELECT 1 FROM item_stores x WHERE x.itemId = i.id AND x.storeId = :storeId)
-        """
-    )
-    abstract fun observePurchaseTimes(storeId: String): Flow<List<PurchaseTime>>
-
-    /** Tapping "+" on a search result or a "probably due" chip: back on the list, tagged here. */
-    @Transaction
-    open suspend fun addExistingToStore(itemId: String, storeId: String) {
-        setNeeded(itemId, true, now())
-        tag(listOf(ItemStore(itemId, storeId)))
-    }
+    abstract fun search(query: String): Flow<List<CatalogItem>>
 
     // ---- WhatsApp import (milestone 7) ----
 
@@ -295,7 +293,8 @@ abstract class ItemDao {
         val at = now()
         rows.forEach { row ->
             val item = row.itemId?.let { byId(it) } ?: findByName(row.name) ?: Item(name = row.name)
-            upsert(item.copy(needed = true, quantity = row.quantity ?: item.quantity, updatedAt = at))
+            val listedAt = if (item.needed) item.listedAt ?: at else at
+            upsert(item.copy(needed = true, checkedAt = null, listedAt = listedAt, quantity = row.quantity ?: item.quantity, updatedAt = at))
             if (row.storeIds.isNotEmpty()) tag(row.storeIds.map { ItemStore(item.id, it) })
         }
     }
@@ -315,15 +314,12 @@ abstract class ItemDao {
     abstract fun observePurchaseHistory(): Flow<List<PurchaseRow>>
 }
 
-/** A search result: the item plus what the ranking and the row need to show. */
+/** A suggestion while typing: the item plus what the ranking and the row need. */
 data class CatalogItem(
     @Embedded val item: Item,
     val timesBought: Int,
-    val lastBought: Long?,
     val storeNames: String?,
 )
-
-data class PurchaseTime(val itemId: String, val name: String, val boughtAt: Long)
 
 /** One reviewed line of a WhatsApp import. itemId is null for a brand-new item. */
 data class ImportWrite(val itemId: String?, val name: String, val quantity: String?, val storeIds: List<String>)
@@ -350,10 +346,6 @@ data class ListItem(
     val otherStores: String?,
 )
 
-data class GotItem(
-    @Embedded val item: Item,
-    val purchaseId: String,
-)
 
 @Dao
 abstract class ChoreDao {

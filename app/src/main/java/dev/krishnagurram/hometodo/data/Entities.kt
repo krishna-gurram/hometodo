@@ -30,8 +30,9 @@ data class Store(
 )
 
 /**
- * An item is never deleted when you buy it. It flips between needed = true
- * (on your list) and needed = false (in your catalog, ready for "buy again").
+ * An item on a list is needed = true. Ticking it sets checkedAt (struck through);
+ * "Clear checked" or a swipe sets needed = false. The item itself is kept so typing
+ * its name later suggests it.
  */
 @Entity(
     tableName = "items",
@@ -47,6 +48,10 @@ data class Item(
     /** Free text on purpose: "2", "20 lb" and "a big bunch" are all valid. */
     val quantity: String? = null,
     val updatedAt: Long = now(),
+    /** When it was put on the list. Lists show items in this order, like lines on paper. */
+    val listedAt: Long? = null,
+    /** Set when you tick it: shown struck through until "Clear checked". Null = still to get. */
+    val checkedAt: Long? = null,
 )
 
 /**

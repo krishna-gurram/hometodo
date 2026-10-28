@@ -15,6 +15,7 @@ object HomeColors {
     val Ring = Color(0xFF9AA0A6)
     val Accent = Color(0xFF1F5F46)
     val Urgent = Color(0xFFB45309)
+    val Danger = Color(0xFFB91C1C)
 }
 
 @Composable

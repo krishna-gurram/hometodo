@@ -8,13 +8,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.krishnagurram.hometodo.data.AppDatabase
 import dev.krishnagurram.hometodo.data.CatalogItem
-import dev.krishnagurram.hometodo.data.GotItem
 import dev.krishnagurram.hometodo.data.Item
 import dev.krishnagurram.hometodo.data.ListItem
 import dev.krishnagurram.hometodo.data.Store
 import dev.krishnagurram.hometodo.data.now
-import dev.krishnagurram.hometodo.domain.BuyAgain
-import dev.krishnagurram.hometodo.domain.DueSuggestion
 import dev.krishnagurram.hometodo.domain.ShareFormatter
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,29 +25,32 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.time.LocalDate
-import java.time.ZoneId
 
 data class StoreListState(
     /** Null if the store was deleted while you were looking at it. */
     val store: Store?,
-    val items: List<ListItem>,
-    val gotToday: List<GotItem>,
+    /** Still to get, in the order you added them. */
+    val toGet: List<ListItem>,
+    /** Ticked, shown struck through at the bottom until "Clear checked". */
+    val checked: List<ListItem>,
 )
 
-data class JustBought(val itemName: String, val itemId: String, val purchaseId: String)
-
-/** What the edit dialog needs: the item, every store, its tags, and when it was bought. */
+/** What the edit dialog needs: the item, every store, and which ones it's tagged to. */
 data class EditItemState(
     val item: Item,
     val allStores: List<Store>,
     val taggedIds: Set<String>,
-    val purchaseTimes: List<Long>,
 )
 
 /**
- * One ViewModel per open store list. Navigation gives each screen its own copy,
- * so opening Indian and then Costco creates two, each with its own storeId.
+ * One store's list, behaving like a list in your notes app:
+ *   type + Enter     -> new line at the bottom
+ *   tick             -> struck through, sinks to the bottom
+ *   tick again       -> back to normal
+ *   Clear checked    -> all struck items leave the list
+ *   swipe left       -> gone (with Undo)
+ *
+ * Navigation gives each open list its own ViewModel, each with its own storeId.
  */
 class StoreListViewModel(
     private val db: AppDatabase,
@@ -59,21 +59,16 @@ class StoreListViewModel(
 
     private val items = db.itemDao()
 
-    private val startOfToday: Long =
-        LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-
-    /** Items bought within this window rank higher in search. Older ones sink but never vanish. */
-    private val activeSince: Long = System.currentTimeMillis() - 180L * 24 * 60 * 60 * 1000
-
     val state: StateFlow<StoreListState?> =
-        combine(
-            db.storeDao().observe(storeId),
-            items.observeList(storeId),
-            items.observeGotToday(storeId, startOfToday),
-        ) { store, list, got -> StoreListState(store, list, got) }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        combine(db.storeDao().observe(storeId), items.observeList(storeId)) { store, list ->
+            StoreListState(
+                store = store,
+                toGet = list.filter { it.item.checkedAt == null },
+                checked = list.filter { it.item.checkedAt != null },
+            )
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    // ---- search-first add box ----
+    // ---- the add box, with quiet suggestions ----
 
     /**
      * The text in the add box. Compose state (not a StateFlow) on purpose: a text field
@@ -84,22 +79,16 @@ class StoreListViewModel(
         private set
 
     /**
-     * snapshotFlow turns that Compose state into a Flow. flatMapLatest: every time the
-     * query changes, throw away the previous search and start a new live query.
-     * Like cancelling a stale fetch when the user keeps typing.
+     * Things you've added before that match what you're typing. snapshotFlow turns the
+     * Compose state into a Flow; flatMapLatest drops the previous search on each keystroke,
+     * like cancelling a stale fetch.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val results: StateFlow<List<CatalogItem>> =
+    val suggestions: StateFlow<List<CatalogItem>> =
         snapshotFlow { query }
             .map { it.trim() }
             .distinctUntilChanged()
-            .flatMapLatest { q -> if (q.isEmpty()) flowOf(emptyList()) else items.search(q, activeSince) }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    /** "Probably due" chips, recomputed whenever this store's purchase history changes. */
-    val suggestions: StateFlow<List<DueSuggestion>> =
-        items.observePurchaseTimes(storeId)
-            .map { BuyAgain.probablyDue(it, System.currentTimeMillis()) }
+            .flatMapLatest { q -> if (q.isEmpty()) flowOf(emptyList()) else items.search(q) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // Not called setQuery: Kotlin already generates a hidden Java method named setQuery
@@ -108,46 +97,55 @@ class StoreListViewModel(
         query = text
     }
 
-    /** Keyboard Done or "Add as new": reuses an item with that exact name if one exists. */
-    fun submitQuery() {
+    /** Enter or the + button: adds what you typed (reusing an item with that exact name). */
+    fun add() {
         val name = query.trim()
         if (name.isEmpty()) return
         query = ""
         viewModelScope.launch { items.quickAdd(name, storeId) }
     }
 
-    fun addExisting(itemId: String) {
+    /** Tapping a suggestion. */
+    fun addSuggestion(itemId: String) {
         query = ""
         viewModelScope.launch { items.addExistingToStore(itemId, storeId) }
     }
 
-    // ---- check off and undo ----
+    // ---- tick, untick, clear ----
 
-    private val _justBought = MutableStateFlow<JustBought?>(null)
-    val justBought: StateFlow<JustBought?> = _justBought.asStateFlow()
-
-    fun checkOff(item: Item) {
+    fun toggle(item: Item) {
         viewModelScope.launch {
-            val purchaseId = items.checkOff(item, storeId)
-            _justBought.value = JustBought(item.name, item.id, purchaseId)
+            if (item.checkedAt == null) items.check(item, storeId) else items.uncheck(item)
         }
     }
 
-    fun undo(bought: JustBought) {
-        _justBought.value = null
-        viewModelScope.launch { items.undoCheckOff(bought.itemId, bought.purchaseId) }
+    fun clearChecked() {
+        viewModelScope.launch { items.clearChecked(storeId, now()) }
+    }
+
+    // ---- swipe to delete, with undo ----
+
+    private val _justRemoved = MutableStateFlow<Item?>(null)
+    val justRemoved: StateFlow<Item?> = _justRemoved.asStateFlow()
+
+    fun remove(item: Item) {
+        viewModelScope.launch {
+            items.removeFromList(item.id, now())
+            _justRemoved.value = item
+        }
+    }
+
+    /** Puts back the exact row as it was before the swipe: same place, same tick state. */
+    fun undoRemove(item: Item) {
+        _justRemoved.value = null
+        viewModelScope.launch { items.upsert(item) }
     }
 
     fun undoExpired() {
-        _justBought.value = null
+        _justRemoved.value = null
     }
 
-    /** Tapping something in "Got it": a mis-tap, so put it back and tear up the receipt. */
-    fun putBack(got: GotItem) {
-        viewModelScope.launch { items.undoCheckOff(got.item.id, got.purchaseId) }
-    }
-
-    // ---- edit dialog ----
+    // ---- edit dialog (tap an item's name) ----
 
     private val _editing = MutableStateFlow<EditItemState?>(null)
     val editing: StateFlow<EditItemState?> = _editing.asStateFlow()
@@ -158,7 +156,6 @@ class StoreListViewModel(
                 item = item,
                 allStores = db.storeDao().all(),
                 taggedIds = items.storeIdsFor(item.id).toSet(),
-                purchaseTimes = items.purchaseTimes(item.id),
             )
         }
     }
@@ -182,18 +179,12 @@ class StoreListViewModel(
         }
     }
 
-    /** Off the list without buying it. No purchase row, so it won't count toward "probably due". */
-    fun removeFromList() {
-        val edit = _editing.value ?: return
-        _editing.value = null
-        viewModelScope.launch { items.setNeeded(edit.item.id, false, now()) }
-    }
-
     // ---- share out ----
 
+    /** Only what's still to get. Struck items are already in the cart. */
     fun shareText(): String? {
         val current = state.value ?: return null
         val store = current.store ?: return null
-        return ShareFormatter.format(store.name, current.items.map { it.item.name to it.item.quantity })
+        return ShareFormatter.format(store.name, current.toGet.map { it.item.name to it.item.quantity })
     }
 }

@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import dev.krishnagurram.hometodo.data.AppDatabase
 import dev.krishnagurram.hometodo.data.Chore
 import dev.krishnagurram.hometodo.data.OpenChore
-import dev.krishnagurram.hometodo.data.SampleData
 import dev.krishnagurram.hometodo.data.StoreWithCount
 import dev.krishnagurram.hometodo.domain.ChoreRow
 import dev.krishnagurram.hometodo.domain.ChoreSchedule
@@ -97,10 +96,6 @@ class SnapshotViewModel(
 
     fun undoExpired() {
         _justDone.value = null
-    }
-
-    fun loadSampleData() {
-        viewModelScope.launch { SampleData.load(db, today()) }
     }
 
     private fun buildState(chores: List<OpenChore>, stores: List<StoreWithCount>, date: LocalDate): SnapshotState {

@@ -15,8 +15,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DateRange
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -77,7 +75,6 @@ fun SnapshotRoute(db: AppDatabase, nav: SnapshotNav) {
         onComplete = vm::complete,
         onUndo = vm::undo,
         onUndoExpired = vm::undoExpired,
-        onLoadSample = vm::loadSampleData,
         nav = nav,
     )
 }
@@ -89,7 +86,6 @@ fun SnapshotScreen(
     onComplete: (Chore) -> Unit,
     onUndo: (JustDone) -> Unit,
     onUndoExpired: () -> Unit,
-    onLoadSample: () -> Unit,
     nav: SnapshotNav,
 ) {
     val snackbar = remember { SnackbarHostState() }
@@ -139,7 +135,7 @@ fun SnapshotScreen(
                 item { SectionLabel("TODAY") }
                 item {
                     when {
-                        state.hasNoChores -> EmptyCard(onLoadSample)
+                        state.hasNoChores -> QuietCard("No chores yet. Tap Chore to add one.")
                         state.today.isEmpty() -> QuietCard("Nothing due today.")
                         else -> ChoreCard(state.today, state.photoCounts, onComplete, nav.openChore)
                     }
@@ -230,24 +226,6 @@ private fun ChoreRowItem(row: ChoreRow, photoCount: Int, onComplete: (Chore) -> 
 private fun QuietCard(message: String) {
     CardSurface {
         Text(message, modifier = Modifier.padding(20.dp), fontSize = 15.sp, color = HomeColors.InkMuted)
-    }
-}
-
-@Composable
-private fun EmptyCard(onLoadSample: () -> Unit) {
-    CardSurface {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("No chores yet", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = HomeColors.Ink)
-            Text(
-                "Tap Chore to add your first one, or load sample data to look around.",
-                fontSize = 14.sp,
-                color = HomeColors.InkMuted,
-            )
-            Button(
-                onClick = onLoadSample,
-                colors = ButtonDefaults.buttonColors(containerColor = HomeColors.Accent),
-            ) { Text("Load sample data") }
-        }
     }
 }
 

@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
@@ -16,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ChorePhoto::class,
         ChoreCompletion::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -30,7 +31,21 @@ abstract class AppDatabase : RoomDatabase() {
         fun build(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "hometodo.db")
                 .addCallback(SeedStores)
+                .addMigrations(MIGRATION_1_2)
                 .build()
+    }
+}
+
+/**
+ * Version 1 -> 2: lists became paper-style (strike through, then "Clear checked").
+ * Two new nullable columns on items. Existing rows get null in both, which means
+ * "unchecked" and "no list position yet", and the list falls back to updatedAt order.
+ * Without this, Room would refuse to open your existing database and the app would crash.
+ */
+private val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE items ADD COLUMN listedAt INTEGER")
+        db.execSQL("ALTER TABLE items ADD COLUMN checkedAt INTEGER")
     }
 }
 
