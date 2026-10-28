@@ -1,6 +1,7 @@
 package dev.krishnagurram.hometodo.data
 
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -47,6 +48,26 @@ abstract class StoreDao {
 
     @Query("SELECT * FROM stores ORDER BY sortOrder")
     abstract suspend fun all(): List<Store>
+
+    @Query("SELECT * FROM stores ORDER BY sortOrder")
+    abstract fun observeAll(): Flow<List<Store>>
+
+    /** Nullable because the store might be deleted while its list screen is open. */
+    @Query("SELECT * FROM stores WHERE id = :storeId")
+    abstract fun observe(storeId: String): Flow<Store?>
+
+    @Upsert
+    abstract suspend fun upsert(store: Store)
+
+    @Query("UPDATE stores SET sortOrder = :order, updatedAt = :at WHERE id = :storeId")
+    abstract suspend fun setSortOrder(storeId: String, order: Int, at: Long)
+
+    /** Rewrites every store's position from a list. Simpler and safer than swapping two numbers. */
+    @Transaction
+    open suspend fun saveOrder(orderedIds: List<String>) {
+        val at = now()
+        orderedIds.forEachIndexed { index, id -> setSortOrder(id, index, at) }
+    }
 
     // ---- deleting a store (decided: warn first, then reset) ----
 
@@ -125,14 +146,99 @@ abstract class ItemDao {
     /**
      * Check-off. Two writes that must succeed or fail together: if the app died
      * between them you'd have an item that's off the list with no history row.
+     * Returns the purchase id so Undo knows which receipt to tear up.
      */
     @Transaction
-    open suspend fun checkOff(item: Item, fromStoreId: String) {
+    open suspend fun checkOff(item: Item, fromStoreId: String): String {
         val at = now()
         markBought(item.id, at)
-        insertPurchase(Purchase(itemId = item.id, storeId = fromStoreId, quantity = item.quantity, boughtAt = at))
+        val purchase = Purchase(itemId = item.id, storeId = fromStoreId, quantity = item.quantity, boughtAt = at)
+        insertPurchase(purchase)
+        return purchase.id
+    }
+
+    @Query("DELETE FROM purchases WHERE id = :purchaseId")
+    abstract suspend fun deletePurchase(purchaseId: String)
+
+    @Query("UPDATE items SET needed = :needed, updatedAt = :at WHERE id = :itemId")
+    abstract suspend fun setNeeded(itemId: String, needed: Boolean, at: Long)
+
+    @Transaction
+    open suspend fun undoCheckOff(itemId: String, purchaseId: String) {
+        deletePurchase(purchaseId)
+        setNeeded(itemId, true, now())
+    }
+
+    // ---- store list screen ----
+
+    /**
+     * Everything on one store's list, plus the OTHER stores each item is tagged to
+     * (the "+ Costco" chips). GROUP_CONCAT joins those names into one string.
+     */
+    @Query(
+        """
+        SELECT i.*,
+          (SELECT GROUP_CONCAT(s2.name, ', ')
+             FROM item_stores x2 JOIN stores s2 ON s2.id = x2.storeId
+            WHERE x2.itemId = i.id AND x2.storeId != :storeId) AS otherStores
+        FROM items i
+        JOIN item_stores x ON x.itemId = i.id
+        WHERE x.storeId = :storeId AND i.needed = 1
+        ORDER BY i.name COLLATE NOCASE
+        """
+    )
+    abstract fun observeList(storeId: String): Flow<List<ListItem>>
+
+    /** Items you checked off at this store since `since` (start of today) and haven't re-added. */
+    @Query(
+        """
+        SELECT i.*, p.id AS purchaseId
+        FROM purchases p JOIN items i ON i.id = p.itemId
+        WHERE p.storeId = :storeId AND p.boughtAt >= :since AND i.needed = 0
+        ORDER BY p.boughtAt DESC
+        """
+    )
+    abstract fun observeGotToday(storeId: String, since: Long): Flow<List<GotItem>>
+
+    /**
+     * Typing "Ghee" in a store's add box. If Ghee already exists anywhere in your
+     * catalog, reuse it (and its history); otherwise create it. Either way, tag it to
+     * this store and put it on the list.
+     */
+    @Transaction
+    open suspend fun quickAdd(name: String, storeId: String) {
+        val item = findByName(name) ?: Item(name = name)
+        addToLists(item, listOf(storeId))
+    }
+
+    @Query("SELECT storeId FROM item_stores WHERE itemId = :itemId")
+    abstract suspend fun storeIdsFor(itemId: String): List<String>
+
+    @Query("DELETE FROM item_stores WHERE itemId = :itemId")
+    abstract suspend fun untagAll(itemId: String)
+
+    @Query("UPDATE items SET quantity = :quantity, updatedAt = :at WHERE id = :itemId")
+    abstract suspend fun setQuantity(itemId: String, quantity: String?, at: Long)
+
+    /** The edit dialog's Save: quantity plus a fresh set of store tags, all at once. */
+    @Transaction
+    open suspend fun saveEdits(itemId: String, quantity: String?, storeIds: List<String>) {
+        setQuantity(itemId, quantity, now())
+        untagAll(itemId)
+        tag(storeIds.map { ItemStore(itemId, it) })
     }
 }
+
+/** A row on a store's list. @Embedded = "the Item's columns are flattened into this row". */
+data class ListItem(
+    @Embedded val item: Item,
+    val otherStores: String?,
+)
+
+data class GotItem(
+    @Embedded val item: Item,
+    val purchaseId: String,
+)
 
 @Dao
 abstract class ChoreDao {

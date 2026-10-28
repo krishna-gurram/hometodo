@@ -4,12 +4,12 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import dev.krishnagurram.hometodo.ui.snapshot.SnapshotRoute
+import dev.krishnagurram.hometodo.ui.AppNav
 import dev.krishnagurram.hometodo.ui.theme.HomeTodoTheme
 
 /**
- * The single Activity. Its whole job is to hand the screen to Compose.
- * Navigation between screens arrives in milestone 3.
+ * The single Activity. Its whole job is to hand the app to Compose.
+ * Which screen shows is decided by AppNav, not by separate Activities.
  */
 class MainActivity : ComponentActivity() {
 
@@ -19,7 +19,7 @@ class MainActivity : ComponentActivity() {
         val db = (application as HomeTodoApp).db
         setContent {
             HomeTodoTheme {
-                SnapshotRoute(db)
+                AppNav(db)
             }
         }
     }
