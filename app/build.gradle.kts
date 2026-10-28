@@ -19,7 +19,23 @@ android {
         versionName = "0.1"
     }
 
+    // Android refuses to install an update signed with a different key than the
+    // installed app ("App not installed"). Each CI machine would otherwise invent its
+    // own debug key, so we commit one shared debug key. It uses Android's standard
+    // public debug passwords and is NOT a secret: never use it for a Play Store release.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
         }
