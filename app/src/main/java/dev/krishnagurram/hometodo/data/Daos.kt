@@ -6,7 +6,9 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Upsert
+import dev.krishnagurram.hometodo.domain.ChoreSchedule
 import kotlinx.coroutines.flow.Flow
+import java.time.LocalDate
 
 // DAOs are Room's version of Spring Data repositories: you write the SQL (or an
 // annotation) and Room generates the implementation at compile time. A bad column
@@ -42,6 +44,9 @@ abstract class StoreDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     abstract suspend fun insertAll(stores: List<Store>)
+
+    @Query("SELECT * FROM stores ORDER BY sortOrder")
+    abstract suspend fun all(): List<Store>
 
     // ---- deleting a store (decided: warn first, then reset) ----
 
@@ -104,6 +109,9 @@ abstract class ItemDao {
     @Query("SELECT COUNT(*) FROM items")
     abstract fun observeCatalogSize(): Flow<Int>
 
+    @Query("SELECT * FROM items WHERE name = :name LIMIT 1")
+    abstract suspend fun findByName(name: String): Item?
+
     @Query("UPDATE items SET needed = 0, updatedAt = :at WHERE id = :itemId")
     abstract suspend fun markBought(itemId: String, at: Long)
 
@@ -134,4 +142,36 @@ abstract class ChoreDao {
 
     @Query("SELECT * FROM chores WHERE completedAt IS NULL ORDER BY dueEpochDay IS NULL, dueEpochDay")
     abstract fun observeOpen(): Flow<List<Chore>>
+
+    @Insert
+    abstract suspend fun insertCompletion(completion: ChoreCompletion)
+
+    @Query("DELETE FROM chore_completions WHERE id = :completionId")
+    abstract suspend fun deleteCompletion(completionId: String)
+
+    /**
+     * Tapping the circle. Always logs a completion (for History). Then either moves a
+     * repeating chore to its next date, or marks a one-off chore finished.
+     * Returns the completion id so the Undo button knows what to remove.
+     */
+    @Transaction
+    open suspend fun complete(chore: Chore, today: LocalDate): String {
+        val at = now()
+        val completion = ChoreCompletion(choreId = chore.id, completedAt = at)
+        insertCompletion(completion)
+        val next = ChoreSchedule.nextDue(chore, today)
+        if (next != null) {
+            upsert(chore.copy(dueEpochDay = next.toEpochDay(), updatedAt = at))
+        } else {
+            upsert(chore.copy(completedAt = at, updatedAt = at))
+        }
+        return completion.id
+    }
+
+    /** Undo puts back the exact chore row we had before, and erases the log entry. */
+    @Transaction
+    open suspend fun undoComplete(previous: Chore, completionId: String) {
+        deleteCompletion(completionId)
+        upsert(previous)
+    }
 }
