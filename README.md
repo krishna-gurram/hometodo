@@ -4,7 +4,6 @@ Offline-only Android app for home chores and per-store grocery lists.
 
 - Kotlin, Jetpack Compose, Room (SQLite)
 - No INTERNET permission. Everything lives on the phone.
-- Lessons for each milestone are in `docs/lessons/`.
 
 ## What it does
 
