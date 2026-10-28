@@ -45,3 +45,4 @@ Each of these teaches you something about where errors show up. Undo each one af
 1. `Item` has `needed: Boolean`, and there's also a `purchases` table. Why not just store `lastBoughtAt` on the item and skip the table? What would "probably due" lose?
 2. `checkOff` is a `@Transaction`. Describe a concrete moment at Costco where not having it would leave your data wrong.
 3. Quantity is free text, not a number. What does that make easy, and what does it make impossible later?
+4. In `StoreDao.deleteAndReset`, swap the two lines so `deleteById` runs first. The code still compiles. What goes wrong? (Hint: what does `CASCADE` remove before `resetItemsOnlyAt` gets to look?)

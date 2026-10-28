@@ -42,6 +42,51 @@ abstract class StoreDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     abstract suspend fun insertAll(stores: List<Store>)
+
+    // ---- deleting a store (decided: warn first, then reset) ----
+
+    /**
+     * Items on your list that ONLY this store sells. These are the ones that would
+     * silently vanish, so the delete screen lists them as a warning.
+     */
+    @Query(
+        """
+        SELECT i.* FROM items i
+        JOIN item_stores x ON x.itemId = i.id AND x.storeId = :storeId
+        WHERE i.needed = 1
+          AND NOT EXISTS (
+              SELECT 1 FROM item_stores y WHERE y.itemId = i.id AND y.storeId != :storeId
+          )
+        ORDER BY i.name
+        """
+    )
+    abstract suspend fun neededItemsOnlyAt(storeId: String): List<Item>
+
+    @Query(
+        """
+        UPDATE items SET needed = 0, updatedAt = :at
+        WHERE needed = 1
+          AND id IN (SELECT itemId FROM item_stores WHERE storeId = :storeId)
+          AND id NOT IN (SELECT itemId FROM item_stores WHERE storeId != :storeId)
+        """
+    )
+    abstract suspend fun resetItemsOnlyAt(storeId: String, at: Long): Int
+
+    @Query("DELETE FROM stores WHERE id = :storeId")
+    abstract suspend fun deleteById(storeId: String)
+
+    /**
+     * Items stay in the catalog (searchable, re-taggable). Only the store and its
+     * labels go away, and orphaned items come off the list so they don't
+     * reappear by surprise when you tag them to another store later.
+     *
+     * The ORDER of these two lines matters. See lesson 1, question 4.
+     */
+    @Transaction
+    open suspend fun deleteAndReset(storeId: String) {
+        resetItemsOnlyAt(storeId, now())
+        deleteById(storeId)
+    }
 }
 
 @Dao
