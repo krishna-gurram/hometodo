@@ -107,7 +107,7 @@ fun StoreListRoute(db: AppDatabase, storeId: String, onBack: () -> Unit) {
                     context.startActivity(Intent.createChooser(send, "Share list"))
                 }
             },
-            setQuery = vm::setQuery,
+            setQuery = vm::onQueryChange,
             submitQuery = vm::submitQuery,
             addExisting = vm::addExisting,
             checkOff = vm::checkOff,

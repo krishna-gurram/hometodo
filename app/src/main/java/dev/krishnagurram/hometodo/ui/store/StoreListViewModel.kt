@@ -102,7 +102,9 @@ class StoreListViewModel(
             .map { BuyAgain.probablyDue(it, System.currentTimeMillis()) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    fun setQuery(text: String) {
+    // Not called setQuery: Kotlin already generates a hidden Java method named setQuery
+    // for the `query` property above, and two methods with one signature won't compile.
+    fun onQueryChange(text: String) {
         query = text
     }
 

@@ -30,11 +30,17 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # Output is also saved to build.log so a failure can be reported (last step).
+      # `set -o pipefail`: without it, "gradlew | tee" reports tee's success even when
+      # Gradle fails, and CI shows a green step for a broken build.
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee -a build.log
+        run: |
+          set -o pipefail
+          ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee -a build.log
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace 2>&1 | tee -a build.log
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug --stacktrace 2>&1 | tee -a build.log
 
       - name: Publish release
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
@@ -43,6 +49,7 @@ jobs:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           RUN: ${{ github.run_number }}
         run: |
+          set -o pipefail
           cp app/build/outputs/apk/debug/app-debug.apk "hometodo-$RUN.apk"
           gh release create "build-$RUN" "hometodo-$RUN.apk" \
             --title "Build $RUN" \
