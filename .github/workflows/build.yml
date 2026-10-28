@@ -29,11 +29,30 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # Output is also saved to build.log so a failure can be reported (next-to-last step).
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: ./gradlew testDebugUnitTest --stacktrace 2>&1 | tee -a build.log
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace 2>&1 | tee -a build.log
+
+      # On failure, post the compiler errors and failed test messages as a comment on the
+      # commit, so they're readable from the GitHub app (and by tools that can't open logs).
+      - name: Report failure on the commit
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Build failed"
+            echo '```'
+            grep -E "^e: |^w: .*error|What went wrong|FAILED|Exception|Caused by" build.log | head -60 || true
+            for f in $(find app/build/test-results -name '*.xml' 2>/dev/null); do
+              grep -o '<testcase name="[^"]*"\|<failure message="[^"]*"' "$f" | grep -B1 '<failure' || true
+            done | head -40
+            echo '```'
+          } > report.md
+          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" -F body=@report.md
 
       - name: Publish release
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
