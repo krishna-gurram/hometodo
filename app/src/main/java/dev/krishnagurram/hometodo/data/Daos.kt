@@ -7,6 +7,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
 import androidx.room.Upsert
+import dev.krishnagurram.hometodo.domain.CatalogEntry
 import dev.krishnagurram.hometodo.domain.ChoreSchedule
 import kotlinx.coroutines.flow.Flow
 import java.time.LocalDate
@@ -220,14 +221,128 @@ abstract class ItemDao {
     @Query("UPDATE items SET quantity = :quantity, updatedAt = :at WHERE id = :itemId")
     abstract suspend fun setQuantity(itemId: String, quantity: String?, at: Long)
 
-    /** The edit dialog's Save: quantity plus a fresh set of store tags, all at once. */
+    @Query("UPDATE items SET aliases = :aliases, updatedAt = :at WHERE id = :itemId")
+    abstract suspend fun setAliases(itemId: String, aliases: String, at: Long)
+
+    /** The edit dialog's Save: quantity, other names, and a fresh set of store tags, all at once. */
     @Transaction
-    open suspend fun saveEdits(itemId: String, quantity: String?, storeIds: List<String>) {
-        setQuantity(itemId, quantity, now())
+    open suspend fun saveEdits(itemId: String, quantity: String?, aliases: String, storeIds: List<String>) {
+        val at = now()
+        setQuantity(itemId, quantity, at)
+        setAliases(itemId, aliases, at)
         untagAll(itemId)
         tag(storeIds.map { ItemStore(itemId, it) })
     }
+
+    @Query("SELECT * FROM items WHERE id = :itemId")
+    abstract suspend fun byId(itemId: String): Item?
+
+    @Query("SELECT boughtAt FROM purchases WHERE itemId = :itemId ORDER BY boughtAt DESC")
+    abstract suspend fun purchaseTimes(itemId: String): List<Long>
+
+    // ---- search and buy again (milestone 4) ----
+
+    /**
+     * The search-first add box. Matches name or aliases anywhere, then ranks:
+     * names that START with what you typed, then items bought in the last 6 months,
+     * then how often you buy it. So "ri" shows the rice you buy weekly first.
+     */
+    @Query(
+        """
+        SELECT i.*,
+          (SELECT COUNT(*) FROM purchases p WHERE p.itemId = i.id) AS timesBought,
+          (SELECT MAX(p.boughtAt) FROM purchases p WHERE p.itemId = i.id) AS lastBought,
+          (SELECT GROUP_CONCAT(s.name, ', ')
+             FROM item_stores x JOIN stores s ON s.id = x.storeId
+            WHERE x.itemId = i.id) AS storeNames
+        FROM items i
+        WHERE i.name LIKE '%' || :query || '%' OR i.aliases LIKE '%' || :query || '%'
+        ORDER BY (i.name LIKE :query || '%') DESC,
+                 (COALESCE(lastBought, 0) >= :activeSince) DESC,
+                 timesBought DESC,
+                 i.name COLLATE NOCASE
+        LIMIT 30
+        """
+    )
+    abstract fun search(query: String, activeSince: Long): Flow<List<CatalogItem>>
+
+    /** Every purchase of items tagged to this store that aren't on the list right now. */
+    @Query(
+        """
+        SELECT p.itemId AS itemId, i.name AS name, p.boughtAt AS boughtAt
+        FROM purchases p JOIN items i ON i.id = p.itemId
+        WHERE i.needed = 0
+          AND EXISTS (SELECT 1 FROM item_stores x WHERE x.itemId = i.id AND x.storeId = :storeId)
+        """
+    )
+    abstract fun observePurchaseTimes(storeId: String): Flow<List<PurchaseTime>>
+
+    /** Tapping "+" on a search result or a "probably due" chip: back on the list, tagged here. */
+    @Transaction
+    open suspend fun addExistingToStore(itemId: String, storeId: String) {
+        setNeeded(itemId, true, now())
+        tag(listOf(ItemStore(itemId, storeId)))
+    }
+
+    // ---- WhatsApp import (milestone 7) ----
+
+    @Query("SELECT id, name, aliases FROM items")
+    abstract suspend fun catalog(): List<CatalogEntry>
+
+    /** Applies the whole reviewed import in one transaction: all items land, or none do. */
+    @Transaction
+    open suspend fun applyImport(rows: List<ImportWrite>) {
+        val at = now()
+        rows.forEach { row ->
+            val item = row.itemId?.let { byId(it) } ?: findByName(row.name) ?: Item(name = row.name)
+            upsert(item.copy(needed = true, quantity = row.quantity ?: item.quantity, updatedAt = at))
+            if (row.storeIds.isNotEmpty()) tag(row.storeIds.map { ItemStore(item.id, it) })
+        }
+    }
+
+    // ---- history (milestone 8) ----
+
+    @Query(
+        """
+        SELECT p.id AS id, i.name AS itemName, s.name AS storeName, s.colorHex AS colorHex, p.boughtAt AS boughtAt
+        FROM purchases p
+        JOIN items i ON i.id = p.itemId
+        LEFT JOIN stores s ON s.id = p.storeId
+        ORDER BY p.boughtAt DESC
+        LIMIT 1000
+        """
+    )
+    abstract fun observePurchaseHistory(): Flow<List<PurchaseRow>>
 }
+
+/** A search result: the item plus what the ranking and the row need to show. */
+data class CatalogItem(
+    @Embedded val item: Item,
+    val timesBought: Int,
+    val lastBought: Long?,
+    val storeNames: String?,
+)
+
+data class PurchaseTime(val itemId: String, val name: String, val boughtAt: Long)
+
+/** One reviewed line of a WhatsApp import. itemId is null for a brand-new item. */
+data class ImportWrite(val itemId: String?, val name: String, val quantity: String?, val storeIds: List<String>)
+
+data class PurchaseRow(
+    val id: String,
+    val itemName: String,
+    val storeName: String?,
+    val colorHex: String?,
+    val boughtAt: Long,
+)
+
+data class ChoreDoneRow(val id: String, val title: String, val completedAt: Long)
+
+/** An open chore plus how many photos it has (for the photo badge on the snapshot). */
+data class OpenChore(
+    @Embedded val chore: Chore,
+    val photoCount: Int,
+)
 
 /** A row on a store's list. @Embedded = "the Item's columns are flattened into this row". */
 data class ListItem(
@@ -280,4 +395,54 @@ abstract class ChoreDao {
         deleteCompletion(completionId)
         upsert(previous)
     }
+
+    @Query(
+        """
+        SELECT c.*, (SELECT COUNT(*) FROM chore_photos p WHERE p.choreId = c.id) AS photoCount
+        FROM chores c
+        WHERE c.completedAt IS NULL
+        ORDER BY c.dueEpochDay IS NULL, c.dueEpochDay
+        """
+    )
+    abstract fun observeOpenWithPhotos(): Flow<List<OpenChore>>
+
+    /** Same as observeOpen, but read once. The reminder needs a snapshot, not a live feed. */
+    @Query("SELECT * FROM chores WHERE completedAt IS NULL")
+    abstract suspend fun openNow(): List<Chore>
+
+    @Query("SELECT * FROM chores WHERE id = :choreId")
+    abstract suspend fun byId(choreId: String): Chore?
+
+    @Query("SELECT * FROM chore_photos WHERE choreId = :choreId ORDER BY addedAt")
+    abstract suspend fun photos(choreId: String): List<ChorePhoto>
+
+    @Insert
+    abstract suspend fun insertPhotos(photos: List<ChorePhoto>)
+
+    @Query("DELETE FROM chore_photos WHERE id IN (:photoIds)")
+    abstract suspend fun deletePhotos(photoIds: List<String>)
+
+    @Query("DELETE FROM chores WHERE id = :choreId")
+    abstract suspend fun delete(choreId: String)
+
+    /**
+     * Save from the chore screen. The chore row must exist BEFORE its photo rows,
+     * because each photo's choreId is a foreign key pointing at it.
+     */
+    @Transaction
+    open suspend fun save(chore: Chore, addPhotos: List<ChorePhoto>, removePhotoIds: List<String>) {
+        upsert(chore)
+        if (removePhotoIds.isNotEmpty()) deletePhotos(removePhotoIds)
+        if (addPhotos.isNotEmpty()) insertPhotos(addPhotos)
+    }
+
+    @Query(
+        """
+        SELECT c.id AS id, ch.title AS title, c.completedAt AS completedAt
+        FROM chore_completions c JOIN chores ch ON ch.id = c.choreId
+        ORDER BY c.completedAt DESC
+        LIMIT 500
+        """
+    )
+    abstract fun observeCompletionHistory(): Flow<List<ChoreDoneRow>>
 }

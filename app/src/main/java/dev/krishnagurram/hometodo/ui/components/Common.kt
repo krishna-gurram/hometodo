@@ -6,7 +6,9 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -103,6 +106,32 @@ internal fun BackBar(onBack: () -> Unit, actions: @Composable () -> Unit = {}) {
         }
         Box(Modifier.weight(1f))
         actions()
+    }
+}
+
+/**
+ * A pill you pick from a set (Weeknight / Weekend / By a date). Selected = dark fill.
+ * Built by hand from a Box so it looks the same everywhere, and it still announces
+ * itself to TalkBack as a selectable option.
+ */
+@Composable
+internal fun Choice(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier
+            .heightIn(min = 44.dp)
+            .background(if (selected) HomeColors.Ink else HomeColors.Card, RoundedCornerShape(14.dp))
+            .border(1.dp, if (selected) HomeColors.Ink else HomeColors.Hairline, RoundedCornerShape(14.dp))
+            .selectable(selected = selected, role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            color = if (selected) Color.White else HomeColors.Ink,
+            maxLines = 1,
+        )
     }
 }
 

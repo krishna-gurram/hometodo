@@ -1,6 +1,8 @@
 package dev.krishnagurram.hometodo.ui.store
 
+import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -8,8 +10,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,6 +21,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
@@ -35,10 +40,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -49,9 +54,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.krishnagurram.hometodo.data.AppDatabase
+import dev.krishnagurram.hometodo.data.CatalogItem
 import dev.krishnagurram.hometodo.data.GotItem
 import dev.krishnagurram.hometodo.data.Item
 import dev.krishnagurram.hometodo.data.ListItem
+import dev.krishnagurram.hometodo.domain.DueSuggestion
 import dev.krishnagurram.hometodo.ui.components.BackBar
 import dev.krishnagurram.hometodo.ui.components.CardSurface
 import dev.krishnagurram.hometodo.ui.components.CheckCircleButton
@@ -59,13 +66,21 @@ import dev.krishnagurram.hometodo.ui.components.CheckedCircle
 import dev.krishnagurram.hometodo.ui.components.ColorDot
 import dev.krishnagurram.hometodo.ui.components.SectionLabel
 import dev.krishnagurram.hometodo.ui.theme.HomeColors
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 @Composable
 fun StoreListRoute(db: AppDatabase, storeId: String, onBack: () -> Unit) {
     val vm: StoreListViewModel = viewModel { StoreListViewModel(db, storeId) }
     val state by vm.state.collectAsStateWithLifecycle()
+    val query = vm.query // Compose state: reading it here subscribes this composable to changes
+    val results by vm.results.collectAsStateWithLifecycle()
+    val suggestions by vm.suggestions.collectAsStateWithLifecycle()
     val justBought by vm.justBought.collectAsStateWithLifecycle()
     val editing by vm.editing.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     // The store was deleted (from Manage stores) while this list was open: leave.
     val current = state
@@ -76,14 +91,31 @@ fun StoreListRoute(db: AppDatabase, storeId: String, onBack: () -> Unit) {
 
     StoreListScreen(
         state = current,
+        query = query,
+        results = results,
+        suggestions = suggestions,
         justBought = justBought,
-        onBack = onBack,
-        onAdd = vm::add,
-        onCheckOff = vm::checkOff,
-        onUndo = vm::undo,
-        onUndoExpired = vm::undoExpired,
-        onPutBack = vm::putBack,
-        onEdit = vm::startEdit,
+        actions = StoreListActions(
+            back = onBack,
+            share = {
+                // ACTION_SEND opens Android's share sheet; you pick WhatsApp (or anything).
+                vm.shareText()?.let { text ->
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, text)
+                    }
+                    context.startActivity(Intent.createChooser(send, "Share list"))
+                }
+            },
+            setQuery = vm::setQuery,
+            submitQuery = vm::submitQuery,
+            addExisting = vm::addExisting,
+            checkOff = vm::checkOff,
+            undo = vm::undo,
+            undoExpired = vm::undoExpired,
+            putBack = vm::putBack,
+            edit = vm::startEdit,
+        ),
     )
 
     editing?.let { edit ->
@@ -96,23 +128,34 @@ fun StoreListRoute(db: AppDatabase, storeId: String, onBack: () -> Unit) {
     }
 }
 
+/** Every event this screen can send up, bundled so the parameter list stays readable. */
+class StoreListActions(
+    val back: () -> Unit,
+    val share: () -> Unit,
+    val setQuery: (String) -> Unit,
+    val submitQuery: () -> Unit,
+    val addExisting: (itemId: String) -> Unit,
+    val checkOff: (Item) -> Unit,
+    val undo: (JustBought) -> Unit,
+    val undoExpired: () -> Unit,
+    val putBack: (GotItem) -> Unit,
+    val edit: (Item) -> Unit,
+)
+
 @Composable
 fun StoreListScreen(
     state: StoreListState?,
+    query: String,
+    results: List<CatalogItem>,
+    suggestions: List<DueSuggestion>,
     justBought: JustBought?,
-    onBack: () -> Unit,
-    onAdd: (String) -> Unit,
-    onCheckOff: (Item) -> Unit,
-    onUndo: (JustBought) -> Unit,
-    onUndoExpired: () -> Unit,
-    onPutBack: (GotItem) -> Unit,
-    onEdit: (Item) -> Unit,
+    actions: StoreListActions,
 ) {
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(justBought) {
         val bought = justBought ?: return@LaunchedEffect
         val result = snackbar.showSnackbar("Got ${bought.itemName}", "Undo", duration = SnackbarDuration.Short)
-        if (result == SnackbarResult.ActionPerformed) onUndo(bought) else onUndoExpired()
+        if (result == SnackbarResult.ActionPerformed) actions.undo(bought) else actions.undoExpired()
     }
 
     Scaffold(
@@ -121,6 +164,7 @@ fun StoreListScreen(
     ) { insets ->
         val store = state?.store
         if (state != null && store != null) {
+            val searching = query.isNotBlank()
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
@@ -131,7 +175,13 @@ fun StoreListScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                item { BackBar(onBack) }
+                item {
+                    BackBar(actions.back) {
+                        IconButton(onClick = actions.share) {
+                            Icon(Icons.Filled.Share, contentDescription = "Share list", tint = HomeColors.Ink)
+                        }
+                    }
+                }
                 item {
                     Row(
                         Modifier.padding(start = 8.dp, bottom = 8.dp),
@@ -143,32 +193,55 @@ fun StoreListScreen(
                         Text("${state.items.size} to get", fontSize = 15.sp, color = HomeColors.InkMuted)
                     }
                 }
-                item { AddField(storeName = store.name, onAdd = onAdd) }
-
                 item {
-                    if (state.items.isEmpty()) {
-                        CardSurface {
-                            Text(
-                                "Nothing to get here. Add something above.",
-                                modifier = Modifier.padding(20.dp),
-                                fontSize = 15.sp,
-                                color = HomeColors.InkMuted,
-                            )
-                        }
-                    } else {
-                        CardSurface {
-                            state.items.forEachIndexed { index, row ->
-                                if (index > 0) HorizontalDivider(Modifier.padding(start = 60.dp), color = HomeColors.Hairline)
-                                NeededRow(row, onCheckOff, onEdit)
+                    SearchField(
+                        query = query,
+                        placeholder = "Add or find an item",
+                        onQueryChange = actions.setQuery,
+                        onSubmit = actions.submitQuery,
+                    )
+                }
+
+                if (searching) {
+                    // While typing, the box becomes search: your catalog, best match first.
+                    item {
+                        SearchResults(
+                            query = query.trim(),
+                            storeName = store.name,
+                            results = results,
+                            onAddExisting = actions.addExisting,
+                            onAddNew = actions.submitQuery,
+                        )
+                    }
+                } else {
+                    if (suggestions.isNotEmpty()) {
+                        item { SectionLabel("PROBABLY DUE") }
+                        item { DueChips(suggestions, actions.addExisting) }
+                    }
+                    item {
+                        if (state.items.isEmpty()) {
+                            CardSurface {
+                                Text(
+                                    "Nothing to get here. Add something above.",
+                                    modifier = Modifier.padding(20.dp),
+                                    fontSize = 15.sp,
+                                    color = HomeColors.InkMuted,
+                                )
+                            }
+                        } else {
+                            CardSurface {
+                                state.items.forEachIndexed { index, row ->
+                                    if (index > 0) HorizontalDivider(Modifier.padding(start = 60.dp), color = HomeColors.Hairline)
+                                    NeededRow(row, actions.checkOff, actions.edit)
+                                }
                             }
                         }
                     }
-                }
-
-                if (state.gotToday.isNotEmpty()) {
-                    item { SectionLabel("GOT IT TODAY · ${state.gotToday.size}") }
-                    // items(list) is LazyColumn's version of map(): one row per element.
-                    items(state.gotToday, key = { it.purchaseId }) { got -> GotRow(got, onPutBack) }
+                    if (state.gotToday.isNotEmpty()) {
+                        item { SectionLabel("GOT IT TODAY · ${state.gotToday.size}") }
+                        // items(list) is LazyColumn's version of map(): one row per element.
+                        items(state.gotToday, key = { it.purchaseId }) { got -> GotRow(got, actions.putBack) }
+                    }
                 }
             }
         }
@@ -176,29 +249,113 @@ fun StoreListScreen(
 }
 
 @Composable
-private fun AddField(storeName: String, onAdd: (String) -> Unit) {
-    // rememberSaveable survives unfolding the phone; plain remember would lose your half-typed text.
-    var text by rememberSaveable { mutableStateOf("") }
-    val submit = {
-        onAdd(text)
-        text = "" // keyboard stays open, so you can add the next item right away
-    }
+private fun SearchField(query: String, placeholder: String, onQueryChange: (String) -> Unit, onSubmit: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
+            value = query,
+            onValueChange = onQueryChange,
             modifier = Modifier.weight(1f),
-            placeholder = { Text("Add to $storeName") },
+            placeholder = { Text(placeholder) },
             singleLine = true,
             shape = RoundedCornerShape(16.dp),
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.Sentences,
                 imeAction = ImeAction.Done,
             ),
-            keyboardActions = KeyboardActions(onDone = { submit() }),
+            // Done adds it and keeps the keyboard open, so you can type the next one.
+            keyboardActions = KeyboardActions(onDone = { onSubmit() }),
         )
-        IconButton(onClick = submit) {
+        IconButton(onClick = onSubmit) {
             Icon(Icons.Filled.Add, contentDescription = "Add item", tint = HomeColors.Accent)
+        }
+    }
+}
+
+@Composable
+private fun SearchResults(
+    query: String,
+    storeName: String,
+    results: List<CatalogItem>,
+    onAddExisting: (String) -> Unit,
+    onAddNew: () -> Unit,
+) {
+    val exactMatch = results.any { it.item.name.equals(query, ignoreCase = true) }
+    CardSurface {
+        results.forEachIndexed { index, result ->
+            if (index > 0) HorizontalDivider(Modifier.padding(start = 16.dp), color = HomeColors.Hairline)
+            val onThisList = result.item.needed &&
+                (result.storeNames?.split(", ")?.contains(storeName) ?: false)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 16.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(result.item.name, fontSize = 17.sp, color = HomeColors.Ink)
+                    Text(describe(result), fontSize = 13.sp, color = HomeColors.InkMuted)
+                }
+                if (onThisList) {
+                    Text(
+                        "On list",
+                        modifier = Modifier.padding(end = 12.dp),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = HomeColors.Accent,
+                    )
+                } else {
+                    IconButton(onClick = { onAddExisting(result.item.id) }) {
+                        Icon(Icons.Filled.Add, contentDescription = "Add ${result.item.name}", tint = HomeColors.Ink)
+                    }
+                }
+            }
+        }
+        if (!exactMatch) {
+            if (results.isNotEmpty()) HorizontalDivider(color = HomeColors.Hairline)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(role = Role.Button, onClick = onAddNew)
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null, tint = HomeColors.Accent)
+                Text("Add “$query” as a new item", fontSize = 16.sp, color = HomeColors.Accent)
+            }
+        }
+    }
+}
+
+private val shortDate = DateTimeFormatter.ofPattern("MMM d", Locale.getDefault())
+
+private fun describe(result: CatalogItem): String {
+    val parts = mutableListOf<String>()
+    result.storeNames?.let { parts += it }
+    if (result.timesBought > 0) {
+        parts += "bought ${result.timesBought}×"
+        result.lastBought?.let { parts += "last " + shortDate.format(Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault())) }
+    }
+    return parts.joinToString(" · ").ifEmpty { "Not bought yet" }
+}
+
+@Composable
+private fun DueChips(suggestions: List<DueSuggestion>, onAdd: (String) -> Unit) {
+    // LazyRow = horizontally scrolling list.
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(suggestions, key = { it.itemId }) { suggestion ->
+            Text(
+                "+ ${suggestion.name}",
+                modifier = Modifier
+                    .heightIn(min = 40.dp)
+                    .border(1.dp, HomeColors.Ring, RoundedCornerShape(20.dp))
+                    .clickable(role = Role.Button, onClickLabel = "Add ${suggestion.name}, usually every ${suggestion.everyDays} days") {
+                        onAdd(suggestion.itemId)
+                    }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                fontSize = 15.sp,
+                color = HomeColors.Ink,
+            )
         }
     }
 }
@@ -260,12 +417,13 @@ private fun GotRow(got: GotItem, onPutBack: (GotItem) -> Unit) {
 @Composable
 private fun EditItemDialog(
     edit: EditItemState,
-    onSave: (quantity: String, storeIds: Set<String>) -> Unit,
+    onSave: (quantity: String, aliases: String, storeIds: Set<String>) -> Unit,
     onRemove: () -> Unit,
     onCancel: () -> Unit,
 ) {
     // Dialog-local draft state. remember(edit) resets it if a different item is opened.
     var quantity by remember(edit) { mutableStateOf(edit.item.quantity ?: "") }
+    var aliases by remember(edit) { mutableStateOf(edit.item.aliases.replace(",", ", ")) }
     var selected by remember(edit) { mutableStateOf(edit.taggedIds) }
     var showStoreError by remember(edit) { mutableStateOf(false) }
 
@@ -274,11 +432,20 @@ private fun EditItemDialog(
         title = { Text(edit.item.name) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(boughtSummary(edit.purchaseTimes), fontSize = 13.sp, color = HomeColors.InkMuted)
                 OutlinedTextField(
                     value = quantity,
                     onValueChange = { quantity = it },
                     label = { Text("Quantity") },
                     placeholder = { Text("2, 20 lb, a big bunch") },
+                    singleLine = true,
+                )
+                OutlinedTextField(
+                    value = aliases,
+                    onValueChange = { aliases = it },
+                    label = { Text("Also called") },
+                    placeholder = { Text("dhania, cilantro") },
+                    supportingText = { Text("Helps match lists shared from WhatsApp") },
                     singleLine = true,
                 )
                 Text("Buy at", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = HomeColors.InkMuted)
@@ -310,11 +477,18 @@ private fun EditItemDialog(
         },
         confirmButton = {
             TextButton(onClick = {
-                if (selected.isEmpty()) showStoreError = true else onSave(quantity, selected)
+                if (selected.isEmpty()) showStoreError = true else onSave(quantity, aliases, selected)
             }) { Text("Save", color = HomeColors.Accent) }
         },
         dismissButton = {
             TextButton(onClick = onCancel) { Text("Cancel", color = HomeColors.InkMuted) }
         },
     )
+}
+
+private fun boughtSummary(times: List<Long>): String {
+    if (times.isEmpty()) return "Never bought yet"
+    val last = shortDate.format(Instant.ofEpochMilli(times.first()).atZone(ZoneId.systemDefault()))
+    val count = if (times.size == 1) "Bought once" else "Bought ${times.size} times"
+    return "$count · last $last"
 }

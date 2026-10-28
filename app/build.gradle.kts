@@ -78,6 +78,10 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.androidx.navigation.compose)
+
+    // Loads chore photos from local files, scaled down so big camera images don't eat memory.
+    // (Coil can load URLs too, but without the INTERNET permission it simply can't.)
+    implementation(libs.coil.compose)
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     implementation(libs.androidx.room.runtime)
