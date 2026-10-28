@@ -1,11 +1,15 @@
-# Builds a debug APK on every push and pull request.
-# The APK is attached to each run under "Artifacts" so you can sideload it on the Fold.
+# Builds and tests on every push and pull request.
+# Every push to main also publishes a GitHub Release with a plain APK attached,
+# which is what you install on the Fold (or what Obtainium watches for updates).
 name: Build
 
 on:
   push:
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write # needed to create releases
 
 jobs:
   build:
@@ -31,9 +35,15 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: hometodo-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
-          retention-days: 14
+      - name: Publish release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          RUN: ${{ github.run_number }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "hometodo-$RUN.apk"
+          gh release create "build-$RUN" "hometodo-$RUN.apk" \
+            --title "Build $RUN" \
+            --notes "${COMMIT_MSG:-Manual build}" \
+            --target "$GITHUB_SHA"

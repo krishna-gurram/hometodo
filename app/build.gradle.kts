@@ -15,8 +15,11 @@ android {
         applicationId = "dev.krishnagurram.hometodo"
         minSdk = 29          // Android 10+. Your Fold is far above this.
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1"
+        // CI sets GITHUB_RUN_NUMBER, so every build gets a higher version than the last.
+        // Android and Obtainium both use this to know an APK is newer. Local builds use 1.
+        val build = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
+        versionCode = build
+        versionName = "0.1.$build"
     }
 
     // Android refuses to install an update signed with a different key than the
